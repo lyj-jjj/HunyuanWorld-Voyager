@@ -11,6 +11,7 @@ from pathlib import Path
 from loguru import logger
 
 import torch
+import torch_npu
 import torch.distributed as dist
 from voyager.constants import PROMPT_TEMPLATE, NEGATIVE_PROMPT, PRECISION_TO_TYPE, NEGATIVE_PROMPT_I2V
 from voyager.vae import load_vae
