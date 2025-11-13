@@ -43,6 +43,21 @@ from voyager.utils.distributed.parallel_mgr import (
     init_distributed_environment
 )
 
+from voyager.vae.parallel_layers import (
+    PatchCausalConv3d,
+    PatchConv3d,
+    PatchGroupNorm3d,
+    BaseModule,
+    AttnProcessor2_0_fa,
+    patchify,
+    depatchify,
+    register_upsample_forward,
+    register_vae_midblock_forward,
+)
+from voyager.vae.unet_causal_3d_blocks import CausalConv3d, UNetMidBlockCausal3D, UpsampleCausal3D
+from voyager.vae.vae import DecoderOutput
+from voyager.vae.vae_parallel import parallel_vae_tile
+
 
 def load_init_camera_params(camera_path, Height, Width):
     if not os.path.exists(camera_path):
@@ -168,6 +183,144 @@ def get_1d_rotary_pos_embed_riflex(
             freqs), freqs)  # complex64     # [S, D/2]
         return freqs_cis
 
+def parallel_full_model_warp(vae, dim=-1):
+    world_size = get_sequence_parallel_world_size()
+    rank = get_sequence_parallel_rank()
+
+    decoder = vae.decoder
+    post_quant_conv = vae.post_quant_conv
+    vae.post_quant_conv = PatchConv3d(post_quant_conv, split_dim=dim)
+
+    for name, module in decoder.named_modules():
+        if isinstance(module, BaseModule):
+            continue
+        for subname, submodule in module.named_children():
+            if isinstance(submodule, CausalConv3d):
+                wrapped_submodule = PatchCausalConv3d(submodule, split_dim=dim, num_blocks=2)
+                setattr(module, subname, wrapped_submodule)
+
+            elif isinstance(submodule, torch.nn.GroupNorm):
+                wrapped_submodule = PatchGroupNorm3d(submodule, split_dim=dim)
+                setattr(module, subname, wrapped_submodule)
+            elif subname == "attentions":
+                submodule[0].processor = AttnProcessor2_0_fa(world_size, rank, split_dim=dim)
+                setattr(module, subname, submodule)
+                if isinstance(module, UNetMidBlockCausal3D):
+                    register_vae_midblock_forward(module)
+            elif isinstance(submodule, UpsampleCausal3D):
+                register_upsample_forward(submodule)
+
+
+def parallelize_vae(pipe):
+    vae = pipe.vae
+    parallel_dim = -1
+    parallel_full_model_warp(vae, parallel_dim)
+
+    @functools.wraps(vae.__class__._decode)
+    def new_decode(
+            self,
+            z: torch.FloatTensor,
+            return_dict: bool = True
+    ) -> Union[DecoderOutput, torch.FloatTensor]:
+        r"""
+        Decode a batch of images/videos using a tiled decoder.
+
+        Args:
+            z (`torch.FloatTensor`): Input batch of latent vectors.
+            return_dict (`bool`, *optional*, defaults to `True`):
+                Whether or not to return a [`~models.vae.DecoderOutput`] instead of a plain tuple.
+
+        Returns:
+            [`~models.vae.DecoderOutput`] or `tuple`:
+                If return_dict is True, a [`~models.vae.DecoderOutput`] is returned, otherwise a plain `tuple` is
+                returned.
+        """
+
+        parallel_dim = -1
+        parallel_overlap = True
+        world_size = get_sequence_parallel_world_size()
+        rank = get_sequence_parallel_rank()
+
+        # Split z into overlapping tiles and decode them separately.
+        # The tiles have an overlap to avoid seams between tiles.
+
+        z_patch = patchify(z, parallel_dim, parallel_overlap, world_size, rank)
+        z_patch = self.post_quant_conv(z_patch)
+        dec_patch = self.decoder(z_patch)
+        decoded_full = depatchify(dec_patch, parallel_dim, parallel_overlap, world_size, rank)
+
+        if not return_dict:
+            return (decoded_full,)
+
+        return DecoderOutput(sample=decoded_full)
+
+    new_decode = new_decode.__get__(vae)
+    vae._decode = new_decode
+    pipe.vae = vae
+
+
+def parallelize_vae_tiling(pipe):
+    vae = pipe.vae
+    parallel_dim = -1
+    parallel_full_model_warp(vae, parallel_dim)
+
+    @functools.wraps(vae.__class__._decode)
+    def new_temporal_tiled_decode(
+            self,
+            z: torch.FloatTensor,
+            return_dict: bool = True
+    ) -> Union[DecoderOutput, torch.FloatTensor]:
+        r"""
+        Decode a batch of images/videos using a tiled decoder.
+
+        Args:
+            z (`torch.FloatTensor`): Input batch of latent vectors.
+            return_dict (`bool`, *optional*, defaults to `True`):
+                Whether or not to return a [`~models.vae.DecoderOutput`] instead of a plain tuple.
+
+        Returns:
+            [`~models.vae.DecoderOutput`] or `tuple`:
+                If return_dict is True, a [`~models.vae.DecoderOutput`] is returned, otherwise a plain `tuple` is
+                returned.
+        """
+
+        parallel_dim = -1
+        parallel_overlap = True
+        world_size = get_sequence_parallel_world_size()
+        rank = get_sequence_parallel_rank()
+
+        B, C, T, H, W = z.shape
+        overlap_size = int(self.tile_latent_min_tsize * (1 - self.tile_overlap_factor))
+        blend_extent = int(self.tile_sample_min_tsize * self.tile_overlap_factor)
+        t_limit = self.tile_sample_min_tsize - blend_extent
+
+        row = []
+        for i in range(0, T, overlap_size):
+            tile = z[:, :, i: i + self.tile_latent_min_tsize + 1, :, :]
+            tile_patch = patchify(tile, parallel_dim, parallel_overlap, world_size, rank)
+            tile_patch = self.post_quant_conv(tile_patch)
+            decoded_patch = self.decoder(tile_patch)
+            decoded = depatchify(decoded_patch, parallel_dim, parallel_overlap, world_size, rank)
+            if i > 0:
+                decoded = decoded[:, :, 1:, :, :]
+            row.append(decoded)
+        result_row = []
+        for i, tile in enumerate(row):
+            if i > 0:
+                tile = self.blend_t(row[i - 1], tile, blend_extent)
+                result_row.append(tile[:, :, :t_limit, :, :])
+            else:
+                result_row.append(tile[:, :, :t_limit + 1, :, :])
+
+        dec = torch.cat(result_row, dim=2)
+        if not return_dict:
+            return (dec,)
+
+        return DecoderOutput(sample=dec)
+
+    new_temporal_tiled_decode = new_temporal_tiled_decode.__get__(vae)
+    vae.temporal_tiled_decode = new_temporal_tiled_decode
+    pipe.vae = vae
 
 ###############################################
 
@@ -561,6 +714,13 @@ class HunyuanVideoSampler(Inference):
 
         if self.parallel_args['ulysses_degree'] > 1 or self.parallel_args['ring_degree'] > 1:
             parallelize_transformer(self.pipeline)
+            if args.vae_parallel:
+                if get_sequence_parallel_world_size() > 8:
+                    # parallelize_vae(self.pipeline)
+                    parallel_vae_tile(self.pipeline.vae, "decode", "decoder.forward")
+                else:
+                    # parallelize_vae_tiling(self.pipeline)]
+                    parallel_vae_tile(self.pipeline.vae, "decode", "decoder.forward")
 
     def load_diffusion_pipeline(
         self,

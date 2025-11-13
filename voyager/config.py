@@ -283,6 +283,13 @@ def add_extra_models_args(parser: argparse.ArgumentParser):
         title="Extra models args, including vae, text encoders and tokenizers)"
     )
 
+    # VAE-parallel
+    group.add_argument(
+        "--vae-parallel",
+        action="store_true",
+        help="Use vae parallel",
+    )
+
     # VAE (Variational Autoencoder) configuration
     group.add_argument(
         "--vae",

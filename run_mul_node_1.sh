@@ -23,4 +23,5 @@ torchrun \
     --save-path ./results \
     --ulysses-degree 8 \
     --ring-degree 2 \
-    --use_attentioncache
+    --use_attentioncache \
+    --vae-parallel
