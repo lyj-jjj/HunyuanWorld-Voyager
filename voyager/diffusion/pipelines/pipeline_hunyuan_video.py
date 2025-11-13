@@ -900,6 +900,13 @@ Please use VaeImageProcessor.postprocess(...) instead"
             else None
         )
 
+        # 计算完encode后to cpu并释放显存, 下轮推理时再重新to npu加载
+        stream = torch_npu.npu.Stream(device)
+        with torch_npu.npu.stream(stream):
+            if next(self.text_encoder.parameters()).device == torch.device("cpu"):
+                self.text_encoder.to(device)
+            if next(self.text_encoder_2.parameters()).device == torch.device("cpu"):
+                self.text_encoder_2.to(device)
         (
             prompt_embeds,
             negative_prompt_embeds,
@@ -946,6 +953,12 @@ Please use VaeImageProcessor.postprocess(...) instead"
             negative_prompt_embeds_2 = None
             prompt_mask_2 = None
             negative_prompt_mask_2 = None
+        with torch_npu.npu.stream(stream):
+            if self.text_encoder.device != torch.device("cpu"):
+                self.text_encoder.to("cpu")
+            if self.text_encoder_2.device != torch.device("cpu"):
+                self.text_encoder_2.to("cpu")
+        torch.npu.empty_cache()
 
         # For classifier free guidance, we need to do two forward passes.
         # Here we concatenate the unconditional and text embeddings into a single batch
