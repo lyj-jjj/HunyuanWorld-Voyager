@@ -11,6 +11,7 @@ from voyager.inference import HunyuanVideoSampler
 import time
 import torch_npu
 from torch_npu.contrib import transfer_to_npu
+from mindiesd import CacheConfig, CacheAgent
 
 def main():
     args = parse_args()
@@ -30,6 +31,43 @@ def main():
 
     # Get the updated args
     args = hunyuan_video_sampler.args
+
+    # add attention cache
+    transformer = hunyuan_video_sampler.pipeline.transformer
+    if args.use_attentioncache:
+        config_double = CacheConfig(
+            method="attention_cache",
+            blocks_count=len(transformer.double_blocks),
+            steps_count=args.infer_steps,
+            step_start=args.start_step,
+            step_interval=args.attentioncache_interval,
+            step_end=args.end_step
+        )
+        config_single = CacheConfig(
+            method="attention_cache",
+            blocks_count=len(transformer.single_blocks),
+            steps_count=args.infer_steps,
+            step_start=args.start_step,
+            step_interval=args.attentioncache_interval,
+            step_end=args.end_step
+        )
+    else:
+        config_double = CacheConfig(
+            method="attention_cache",
+            blocks_count=len(transformer.double_blocks),
+            steps_count=args.infer_steps
+        )
+        config_single = CacheConfig(
+            method="attention_cache",
+            blocks_count=len(transformer.single_blocks),
+            steps_count=args.infer_steps
+        )
+    cache_double = CacheAgent(config_double)
+    cache_single = CacheAgent(config_single)
+    for block in transformer.double_blocks:
+        block.cache = cache_double
+    for block in transformer.single_blocks:
+        block.cache = cache_single
 
     # warmup
     outputs = hunyuan_video_sampler.predict(

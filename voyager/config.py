@@ -28,6 +28,7 @@ def parse_args(mode="eval", namespace=None):
     parser = add_lora_args(parser)
     parser = add_inference_args(parser)
     parser = add_parallel_args(parser)
+    parser = add_attentioncache_args(parser)
     
     # Add training-specific arguments if in training mode
     if mode == "train":
@@ -42,6 +43,16 @@ def parse_args(mode="eval", namespace=None):
 
     return args
 
+def add_attentioncache_args(parser: argparse.ArgumentParser):
+    group = parser.add_argument_group(title="Attention Cache args")
+
+    group.add_argument("--use_attentioncache", action='store_true')
+    group.add_argument("--attentioncache_ratio", type=float, default=1.2)
+    group.add_argument("--attentioncache_interval", type=int, default=3)
+    group.add_argument("--start_step", type=int, default=9)
+    group.add_argument("--end_step", type=int, default=47)
+
+    return parser
 
 def add_train_denoise_schedule_args(parser: argparse.ArgumentParser):
     """Add flow matching denoising schedule arguments for training

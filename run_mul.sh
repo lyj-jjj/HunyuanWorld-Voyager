@@ -17,4 +17,5 @@ torchrun --master_port=2031 --nproc_per_node=16 \
     --embedded-cfg-scale 6.0 \
     --save-path ./results \
     --ulysses-degree 8 \
-    --ring-degree 2
+    --ring-degree 2 \
+    --use_attentioncache

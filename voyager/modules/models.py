@@ -128,6 +128,8 @@ class MMDoubleStreamBlock(nn.Module):
             **factory_kwargs,
         )
         self.hybrid_seq_parallel_attn = None
+        # attention cache
+        self.cache = None
 
     def enable_deterministic(self):
         self.deterministic = True
@@ -135,54 +137,23 @@ class MMDoubleStreamBlock(nn.Module):
     def disable_deterministic(self):
         self.deterministic = False
 
-    def forward(
+    def double_forward(
         self,
-        img: torch.Tensor,
-        txt: torch.Tensor,
-        vec: torch.Tensor,
-        cu_seqlens_q: Optional[torch.Tensor] = None,
-        cu_seqlens_kv: Optional[torch.Tensor] = None,
-        max_seqlen_q: Optional[int] = None,
-        max_seqlen_kv: Optional[int] = None,
-        freqs_cis: tuple = None,
-        condition_type: str = None,
-        token_replace_vec: torch.Tensor = None,
-        frist_frame_token_num: int = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        if condition_type == "token_replace":
-            img_mod1, token_replace_img_mod1 = self.img_mod(vec, condition_type=condition_type,
-                                                            token_replace_vec=token_replace_vec)
-            (img_mod1_shift,
-             img_mod1_scale,
-             img_mod1_gate,
-             img_mod2_shift,
-             img_mod2_scale,
-             img_mod2_gate) = img_mod1.chunk(6, dim=-1)
-            (tr_img_mod1_shift,
-             tr_img_mod1_scale,
-             tr_img_mod1_gate,
-             tr_img_mod2_shift,
-             tr_img_mod2_scale,
-             tr_img_mod2_gate) = token_replace_img_mod1.chunk(6, dim=-1)
-        else:
-            (
-                img_mod1_shift,
-                img_mod1_scale,
-                img_mod1_gate,
-                img_mod2_shift,
-                img_mod2_scale,
-                img_mod2_gate,
-            ) = self.img_mod(vec).chunk(6, dim=-1)
-
-        (
-            txt_mod1_shift,
-            txt_mod1_scale,
-            txt_mod1_gate,
-            txt_mod2_shift,
-            txt_mod2_scale,
-            txt_mod2_gate,
-        ) = self.txt_mod(vec).chunk(6, dim=-1)
-
+        img, txt,
+        img_mod1_shift,
+        img_mod1_scale,
+        txt_mod1_shift,
+        txt_mod1_scale,
+        freqs_cis,
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        max_seqlen_q,
+        max_seqlen_kv,
+        tr_img_mod1_shift,
+        tr_img_mod1_scale,
+        condition_type,
+        frist_frame_token_num,
+    ):
         # Prepare image for attention.
         img_modulated = self.img_norm1(img)
         if condition_type == "token_replace":
@@ -256,8 +227,75 @@ class MMDoubleStreamBlock(nn.Module):
                 cu_seqlens_q=cu_seqlens_q,
                 cu_seqlens_kv=cu_seqlens_kv
             )
+        return attn
 
-        # attention computation end
+    def forward(
+        self,
+        img: torch.Tensor,
+        txt: torch.Tensor,
+        vec: torch.Tensor,
+        cu_seqlens_q: Optional[torch.Tensor] = None,
+        cu_seqlens_kv: Optional[torch.Tensor] = None,
+        max_seqlen_q: Optional[int] = None,
+        max_seqlen_kv: Optional[int] = None,
+        freqs_cis: tuple = None,
+        condition_type: str = None,
+        token_replace_vec: torch.Tensor = None,
+        frist_frame_token_num: int = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        tr_img_mod1_shift = None
+        tr_img_mod1_scale = None
+        if condition_type == "token_replace":
+            img_mod1, token_replace_img_mod1 = self.img_mod(vec, condition_type=condition_type,
+                                                            token_replace_vec=token_replace_vec)
+            (img_mod1_shift,
+             img_mod1_scale,
+             img_mod1_gate,
+             img_mod2_shift,
+             img_mod2_scale,
+             img_mod2_gate) = img_mod1.chunk(6, dim=-1)
+            (tr_img_mod1_shift,
+             tr_img_mod1_scale,
+             tr_img_mod1_gate,
+             tr_img_mod2_shift,
+             tr_img_mod2_scale,
+             tr_img_mod2_gate) = token_replace_img_mod1.chunk(6, dim=-1)
+        else:
+            (
+                img_mod1_shift,
+                img_mod1_scale,
+                img_mod1_gate,
+                img_mod2_shift,
+                img_mod2_scale,
+                img_mod2_gate,
+            ) = self.img_mod(vec).chunk(6, dim=-1)
+
+        (
+            txt_mod1_shift,
+            txt_mod1_scale,
+            txt_mod1_gate,
+            txt_mod2_shift,
+            txt_mod2_scale,
+            txt_mod2_gate,
+        ) = self.txt_mod(vec).chunk(6, dim=-1)
+
+        # attn cache
+        attn = self.cache.apply(self.double_forward,
+            img=img, txt=txt,
+            img_mod1_shift=img_mod1_shift,
+            img_mod1_scale=img_mod1_scale,
+            txt_mod1_shift=txt_mod1_shift,
+            txt_mod1_scale=txt_mod1_scale,
+            freqs_cis=freqs_cis,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=cu_seqlens_kv,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_kv=max_seqlen_kv,
+            tr_img_mod1_shift=tr_img_mod1_shift,
+            tr_img_mod1_scale=tr_img_mod1_scale,
+            condition_type=condition_type,
+            frist_frame_token_num=frist_frame_token_num
+        )
 
         img_attn, txt_attn = attn[:, : img.shape[1]], attn[:, img.shape[1]:]
 
@@ -369,12 +407,75 @@ class MMSingleStreamBlock(nn.Module):
             **factory_kwargs,
         )
         self.hybrid_seq_parallel_attn = None
+        # attention cache
+        self.cache = None
 
     def enable_deterministic(self):
         self.deterministic = True
 
     def disable_deterministic(self):
         self.deterministic = False
+
+    def single_forward(
+        self,
+        qkv,
+        freqs_cis,
+        txt_len,
+        x,
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        max_seqlen_q,
+        max_seqlen_kv
+    ):
+        q, k, v = rearrange(qkv, "B L (K H D) -> K B L H D",
+                            K=3, H=self.heads_num)
+
+        # Apply QK-Norm if needed.
+        q = self.q_norm(q).to(v)
+        k = self.k_norm(k).to(v)
+
+        # Apply RoPE if needed.
+        if freqs_cis is not None:
+            img_q, txt_q = q[:, :-txt_len, :, :], q[:, -txt_len:, :, :]
+            img_k, txt_k = k[:, :-txt_len, :, :], k[:, -txt_len:, :, :]
+            img_qq, img_kk = apply_rotary_emb(
+                img_q, img_k, freqs_cis, head_first=False)
+            assert (
+                    img_qq.shape == img_q.shape and img_kk.shape == img_k.shape
+            ), f"img_kk: {img_qq.shape}, img_q: {img_q.shape}, img_kk: {img_kk.shape}, img_k: {img_k.shape}"
+            img_q, img_k = img_qq, img_kk
+            q = torch.cat((img_q, txt_q), dim=1)
+            k = torch.cat((img_k, txt_k), dim=1)
+
+        # Compute attention.
+        assert (
+                cu_seqlens_q.shape[0] == 2 * x.shape[0] + 1
+        ), f"cu_seqlens_q.shape:{cu_seqlens_q.shape}, x.shape[0]:{x.shape[0]}"
+
+        # attention computation start
+        if not self.hybrid_seq_parallel_attn:
+            attn = attention(
+                q,
+                k,
+                v,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_kv=cu_seqlens_kv,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=max_seqlen_kv,
+                batch_size=x.shape[0],
+            )
+        else:
+            attn = parallel_attention(
+                self.hybrid_seq_parallel_attn,
+                q,
+                k,
+                v,
+                img_q_len=img_q.shape[1],
+                img_kv_len=img_k.shape[1],
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_kv=cu_seqlens_kv
+            )
+        return attn
 
     def forward(
         self,
@@ -413,55 +514,17 @@ class MMSingleStreamBlock(nn.Module):
             self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim], dim=-1
         )
 
-        q, k, v = rearrange(qkv, "B L (K H D) -> K B L H D",
-                            K=3, H=self.heads_num)
-
-        # Apply QK-Norm if needed.
-        q = self.q_norm(q).to(v)
-        k = self.k_norm(k).to(v)
-
-        # Apply RoPE if needed.
-        if freqs_cis is not None:
-            img_q, txt_q = q[:, :-txt_len, :, :], q[:, -txt_len:, :, :]
-            img_k, txt_k = k[:, :-txt_len, :, :], k[:, -txt_len:, :, :]
-            img_qq, img_kk = apply_rotary_emb(
-                img_q, img_k, freqs_cis, head_first=False)
-            assert (
-                img_qq.shape == img_q.shape and img_kk.shape == img_k.shape
-            ), f"img_kk: {img_qq.shape}, img_q: {img_q.shape}, img_kk: {img_kk.shape}, img_k: {img_k.shape}"
-            img_q, img_k = img_qq, img_kk
-            q = torch.cat((img_q, txt_q), dim=1)
-            k = torch.cat((img_k, txt_k), dim=1)
-
-        # Compute attention.
-        assert (
-            cu_seqlens_q.shape[0] == 2 * x.shape[0] + 1
-        ), f"cu_seqlens_q.shape:{cu_seqlens_q.shape}, x.shape[0]:{x.shape[0]}"
-
-        # attention computation start
-        if not self.hybrid_seq_parallel_attn:
-            attn = attention(
-                q,
-                k,
-                v,
-                cu_seqlens_q=cu_seqlens_q,
-                cu_seqlens_kv=cu_seqlens_kv,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_kv=max_seqlen_kv,
-                batch_size=x.shape[0],
-            )
-        else:
-            attn = parallel_attention(
-                self.hybrid_seq_parallel_attn,
-                q,
-                k,
-                v,
-                img_q_len=img_q.shape[1],
-                img_kv_len=img_k.shape[1],
-                cu_seqlens_q=cu_seqlens_q,
-                cu_seqlens_kv=cu_seqlens_kv
-            )
-        # attention computation end
+        # attn cache
+        attn = self.cache.apply(self.single_forward,
+            qkv=qkv,
+            freqs_cis=freqs_cis,
+            txt_len=txt_len,
+            x=x,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=cu_seqlens_kv,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_kv=max_seqlen_kv
+        )
 
         # Compute activation in mlp stream, cat again and run second linear layer.
         output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))

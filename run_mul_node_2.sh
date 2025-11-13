@@ -22,4 +22,5 @@ torchrun \
     --embedded-cfg-scale 6.0 \
     --save-path ./results \
     --ulysses-degree 8 \
-    --ring-degree 2
+    --ring-degree 2 \
+    --use_attentioncache
