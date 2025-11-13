@@ -11,6 +11,9 @@ from pathlib import Path
 from loguru import logger
 
 import torch
+import torch_npu
+from torch_npu.contrib import transfer_to_npu
+
 import torch.distributed as dist
 from voyager.constants import PROMPT_TEMPLATE, NEGATIVE_PROMPT, PRECISION_TO_TYPE, NEGATIVE_PROMPT_I2V
 from voyager.vae import load_vae
@@ -32,22 +35,13 @@ import cv2
 import pyexr
 import torchvision.transforms as T
 
-try:
-    import xfuser
-    from xfuser.core.distributed import (
-        get_sequence_parallel_world_size,
-        get_sequence_parallel_rank,
-        get_sp_group,
-        initialize_model_parallel,
-        init_distributed_environment
-    )
-except:
-    xfuser = None
-    get_sequence_parallel_world_size = None
-    get_sequence_parallel_rank = None
-    get_sp_group = None
-    initialize_model_parallel = None
-    init_distributed_environment = None
+from voyager.utils.distributed.parallel_mgr import (
+    get_sequence_parallel_world_size,
+    get_sequence_parallel_rank,
+    get_sp_group,
+    initialize_model_parallel,
+    init_distributed_environment
+)
 
 
 def load_init_camera_params(camera_path, Height, Width):
@@ -238,7 +232,7 @@ def parallelize_transformer(pipe):
         ), dim=split_dim - 1)[get_sequence_parallel_rank()]
         freqs_sin_cond = freqs_sin_cond.reshape(-1, dim_thw_cond)
 
-        from xfuser.core.long_ctx_attention import xFuserLongContextAttention
+        from voyager.modules.attn_layers import xFuserLongContextAttention
 
         for block in transformer.double_blocks + transformer.single_blocks:
             block.hybrid_seq_parallel_attn = xFuserLongContextAttention()
@@ -386,6 +380,20 @@ class Inference(object):
         self.logger = logger
         self.parallel_args = parallel_args
 
+    @classmethod
+    def initialize_usp(args):
+        from voyager.utils.distributed.parallel_mgr import init_parallel_env, ParallelConfig
+        dist.init_process_group(backend="hccl", init_method="env://")
+        parallel_config = ParallelConfig(
+            sp_degree=dist.get_world_size(),
+            ulysses_degree=args.ulysses_degree,
+            ring_degree=args.ring_degree,
+            tp_degree=1,
+            use_cfg_parallel=False,
+            world_size=dist.get_world_size(),
+        )
+        init_parallel_env(parallel_config)
+
     # 20250316 pftq: Fixed multi-GPU loading times going up to 20 min due to loading contention
     # by loading models only to one GPU and braodcasting to the rest.
     @classmethod
@@ -407,25 +415,15 @@ class Inference(object):
         # ========================================================================
         # 20250316 pftq: Modified to extract rank and world_size early for sequential loading
         if args.ulysses_degree > 1 or args.ring_degree > 1:
-            assert xfuser is not None, "Ulysses Attention and Ring Attention requires xfuser package."
             assert args.use_cpu_offload is False, "Cannot enable use_cpu_offload in the distributed environment."
             # 20250316 pftq: Set local rank and device explicitly for NCCL
             local_rank = int(os.environ['LOCAL_RANK'])
             device = torch.device(f"cuda:{local_rank}")
             # 20250316 pftq: Set CUDA device explicitly
             torch.cuda.set_device(local_rank)
-            # 20250316 pftq: Removed device_id, rely on set_device
-            dist.init_process_group("nccl")
+            initialize_usp()
             rank = dist.get_rank()
             world_size = dist.get_world_size()
-            assert world_size == args.ring_degree * args.ulysses_degree, \
-                "number of GPUs should be equal to ring_degree * ulysses_degree."
-            init_distributed_environment(rank=rank, world_size=world_size)
-            initialize_model_parallel(
-                sequence_parallel_degree=world_size,
-                ring_degree=args.ring_degree,
-                ulysses_degree=args.ulysses_degree,
-            )
         else:
             rank = 0  # 20250316 pftq: Default rank for single GPU
             world_size = 1  # 20250316 pftq: Default world_size for single GPU
@@ -869,6 +867,8 @@ class HunyuanVideoSampler(Inference):
         partial_mask = torch.stack(
             partial_mask, dim=1).unsqueeze(0).to(self.device)
 
+        torch.npu.synchronize()
+        start_time = time.time()
         # Use automatic mixed precision for memory efficiency during encoding
         with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=True):
             # Enable VAE tiling for processing large images/videos efficiently
@@ -933,6 +933,9 @@ class HunyuanVideoSampler(Inference):
             # plucker_features = torch.cat([plucker_features,
             #     torch.ones(1, 6, plucker_features.shape[2], 2, plucker_features.shape[-1]).to(self.device),
             #     plucker_features], dim=-2)
+        torch.npu.synchronize()
+        end_time = time.time()
+        print(f"-VAE enc time: {end_time - start_time} seconds")
 
         # Generate rotary position embeddings for the target video dimensions
         # These embeddings provide positional information to the transformer model
@@ -970,6 +973,7 @@ class HunyuanVideoSampler(Inference):
                    ring_degree: {ring_degree}"""
         logger.debug(debug_str)
 
+        torch.npu.synchronize()
         start_time = time.time()
         samples = self.pipeline(
             prompt=prompt,

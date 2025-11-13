@@ -16,9 +16,12 @@
 # Modified from diffusers==0.29.2
 #
 # ==============================================================================
+import os
+import time
 import inspect
 from typing import Any, Callable, Dict, List, Optional, Union, Tuple
 import torch
+import torch_npu
 import torch.distributed as dist
 import numpy as np
 from dataclasses import dataclass
@@ -888,8 +891,7 @@ Please use VaeImageProcessor.postprocess(...) instead"
         else:
             batch_size = prompt_embeds.shape[0]
 
-        device = torch.device(
-            f"cuda:{dist.get_rank()}") if dist.is_initialized() else self._execution_device
+        device = torch.device(f"cuda:{os.environ['LOCAL_RANK']}") if dist.is_initialized() else self._execution_device
 
         # 3. Encode input prompt
         lora_scale = (
@@ -1033,6 +1035,8 @@ Please use VaeImageProcessor.postprocess(...) instead"
             num_inference_steps * self.scheduler.order
         self._num_timesteps = len(timesteps)
 
+        torch.npu.synchronize()
+        start_time = time.time()
         # if is_progress_bar:
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
@@ -1145,7 +1149,12 @@ Please use VaeImageProcessor.postprocess(...) instead"
                     if callback is not None and i % callback_steps == 0:
                         step_idx = i // getattr(self.scheduler, "order", 1)
                         callback(step_idx, t, latents)
+        torch.npu.synchronize()
+        end = time.time()
+        print(f"-DIT time: {end - start} seconds")
+        torch.npu.empty_cache()
 
+        start_time = time.time()
         if not output_type == "latent":
             expand_temporal_dim = False
             if len(latents.shape) == 4:
@@ -1189,6 +1198,9 @@ Please use VaeImageProcessor.postprocess(...) instead"
 
         else:
             image = latents
+        torch.npu.synchronize()
+        end = time.time()
+        print(f"-VAE dec time: {end - start} seconds")
 
         image = (image / 2 + 0.5).clamp(0, 1)
         # we always cast to float32 as this does not cause significant overhead and is compatible with bfloa16

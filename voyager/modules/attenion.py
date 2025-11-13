@@ -4,16 +4,10 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch_npu
+import numpy as np
 
-try:
-    import flash_attn
-    from flash_attn.flash_attn_interface import _flash_attn_forward
-    from flash_attn.flash_attn_interface import flash_attn_varlen_func
-except ImportError:
-    flash_attn = None
-    flash_attn_varlen_func = None
-    _flash_attn_forward = None
-
+MAX_TOKEN = 2147483647
 
 MEMORY_LAYOUT = {
     "flash": (
@@ -29,6 +23,100 @@ MEMORY_LAYOUT = {
         lambda x: x.transpose(1, 2),
     ),
 }
+
+def npu_fa_bnsd(query, key, value, attn_mask=None, dropout_p=0.0, scale=None, is_causal=False):
+    atten_mask = attn_mask
+    if not is_causal:
+        if atten_mask is None:
+            atten_mask_npu = None
+        elif atten_mask.dtype == torch.bool:
+            atten_mask_npu = torch.logical_not(atten_mask.bool())
+        else:
+            atten_mask_npu = atten_mask.bool()
+        res = torch_npu.npu_fusion_attention(
+            query, key, value, query.shape[1], input_layout="BNSD",
+            pse=None,
+            atten_mask=atten_mask_npu,
+            scale=query.shape[-1] ** -0.5,
+            pre_tockens=2147483647,
+            next_tockens=2147483647,
+            keep_prob=1 - dropout_p
+        )[0]
+        return res
+    else:
+        atten_mask_npu = torch.triu(torch.ones([2048, 2048], dtype=torch.bool, device=query.device), diagonal=1)
+        res = torch_npu.npu_fusion_attention(
+            query, key, value, query.shape[1], input_layout="BNSD",
+            pse=None,
+            atten_mask=atten_mask_npu,
+            scale=query.shape[-1] ** -0.5,
+            keep_prob=1 - dropout_p,
+            sparse_mode=2)[0]
+        return res
+
+def npu_fa_bsnd(q, k, v, dropout_p=0.0, softmax_scale=None, causal=False):
+    if not causal:
+        fa_out = torch_npu.npu_fusion_attention(q, k, v, q.shape[2], "BSND",
+                                                keep_prob=1 - dropout_p,
+                                                scale=softmax_scale)[0]
+    else:
+        fa_out = torch_npu.npu_fusion_attention(q, k, v, q.shape[2], "BSND",
+                                                keep_prob=1 - dropout_p,
+                                                scale=softmax_scale,
+                                                atten_mask=torch.triu(
+                                                    torch.ones([2048, 2048], dtype=torch.bool, device=q.device),
+                                                    diagonal=1),
+                                                sparse_mode=3)[0]
+    return fa_out
+
+
+def npu_fa_varlen(q, k, v,
+                  cu_seqlens_q,
+                  cu_seqlens_k,
+                  max_seqlen_q,
+                  max_seqlen_k,
+                  dropout_p=0.0,
+                  softmax_scale=None,
+                  causal=False,
+                  window_size=(-1, -1),
+                  alibi_slopes=None,
+                  deterministic=False,
+                  return_attn_probs=False,
+                  block_table=None
+                  ):
+    if not causal:
+        fa_out = torch_npu.npu_fusion_attention(
+            q, k, v, q.shape[1],
+            pse=None,
+            atten_mask=None,
+            scale=q.shape[-1] ** -0.5,
+            keep_prob=1 - dropout_p,
+            input_layout="TND",
+            actual_seq_qlen=tuple(cu_seqlens_q[1:].tolist()),
+            actual_seq_kvlen=tuple(cu_seqlens_k[1:].tolist())
+        )[0]
+    else:
+        fa_out = torch_npu.npu_fusion_attention(
+            q, k, v, q.shape[1],
+            pse=None,
+            atten_mask=torch.triu(torch.ones([2048, 2048], dtype=torch.bool, device=q.device), diagonal=1),
+            scale=q.shape[-1] ** -0.5,
+            keep_prob=1 - dropout_p,
+            input_layout="TND",
+            actual_seq_qlen=tuple(cu_seqlens_q[1:].tolist()),
+            actual_seq_kvlen=tuple(cu_seqlens_k[1:].tolist()),
+            sparse_mode=3)[0]
+    return fa_out
+
+
+def apply_npu_fa_patch():
+    torch.nn.functional.scaled_dot_product_attention = npu_fa_bnsd
+    global flash_attn_func, flash_attn_varlen_func
+    flash_attn_func = npu_fa_bsnd  # 定长的序列
+    flash_attn_varlen_func = npu_fa_varlen  # 变长序列
+
+
+apply_npu_fa_patch()
 
 
 def get_cu_seqlens(text_mask, img_len):
@@ -179,33 +267,18 @@ def parallel_attention(
         joint_tensor_value=v[:, img_kv_len:cu_seqlens_kv[1]],
         joint_strategy="rear",
     )
-    if flash_attn.__version__ >= '2.7.0':
-        attn2, *_ = _flash_attn_forward(
-            q[:, cu_seqlens_q[1]:],
-            k[:, cu_seqlens_kv[1]:],
-            v[:, cu_seqlens_kv[1]:],
-            dropout_p=0.0,
-            softmax_scale=q.shape[-1] ** (-0.5),
-            causal=False,
-            window_size_left=-1,
-            window_size_right=-1,
-            softcap=0.0,
-            alibi_slopes=None,
-            return_softmax=False,
-        )
-    else:
-        attn2, *_ = _flash_attn_forward(
-            q[:, cu_seqlens_q[1]:],
-            k[:, cu_seqlens_kv[1]:],
-            v[:, cu_seqlens_kv[1]:],
-            dropout_p=0.0,
-            softmax_scale=q.shape[-1] ** (-0.5),
-            causal=False,
-            window_size=(-1, -1),
-            softcap=0.0,
-            alibi_slopes=None,
-            return_softmax=False,
-        )
+    scale = q.shape[-1] ** -0.5
+    attn2 = torch_npu.npu_fusion_attention(
+        q[:, cu_seqlens_q[1]:],
+        k[:, cu_seqlens_kv[1]:],
+        v[:, cu_seqlens_kv[1]:],
+        head_num=q.shape[-2],
+        input_layout="BSND",
+        scale=scale,
+        pre_tockens=MAX_TOKEN,
+        next_tockens=MAX_TOKEN
+    )[0]
+
     attn = torch.cat([attn1, attn2], dim=1)
     b, s, a, d = attn.shape
     attn = attn.reshape(b, s, -1)

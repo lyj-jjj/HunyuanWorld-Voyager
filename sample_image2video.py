@@ -8,6 +8,9 @@ from voyager.utils.file_utils import save_videos_grid
 from voyager.config import parse_args
 from voyager.inference import HunyuanVideoSampler
 
+import time
+import torch_npu
+from torch_npu.contrib import transfer_to_npu
 
 def main():
     args = parse_args()
@@ -30,6 +33,8 @@ def main():
 
     # Start sampling
     # TODO: batch inference check
+    torch.npu.synchronize()
+    start_time = time.time
     outputs = hunyuan_video_sampler.predict(
         prompt=args.prompt,
         height=args.video_size[0],
@@ -57,6 +62,9 @@ def main():
         partial_mask=[(os.path.join(args.input_path, "video_input", f"mask_{j:04d}.png"), os.path.join(
             args.input_path, "video_input", f"mask_{j:04d}.png")) for j in range(49)]
     )
+    torch.npu.synchronize()
+    end_time = time.time()
+    print(f"-E2E time: {end_time - start_time} seconds")
     samples = outputs['samples']
 
     # Save generated videos to disk
