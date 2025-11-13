@@ -36,15 +36,14 @@ logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 def prepare_causal_attention_mask(n_frame: int, n_hw: int, dtype, device, batch_size: int = None):
     seq_len = n_frame * n_hw
-    mask = torch.full((seq_len, seq_len), float(
-        "-inf"), dtype=dtype, device=device)
-    for i in range(seq_len):
-        i_frame = i // n_hw
-        mask[i, : (i_frame + 1) * n_hw] = 0
+    indices = torch.arange(seq_len, dtype=torch.int64, device=device)
+    frame_indices = indices // n_hw
+    mask = (frame_indices.unsqueeze(1) >= (indices // n_hw))
+    mask = torch.where(mask, torch.tensor(0., dtype=dtype, device=device),
+        torch.tensor(float('-inf'), dtype=dtype, device=device))
     if batch_size is not None:
         mask = mask.unsqueeze(0).expand(batch_size, -1, -1)
     return mask
-
 
 class CausalConv3d(nn.Module):
     """
