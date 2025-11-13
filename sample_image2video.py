@@ -31,6 +31,35 @@ def main():
     # Get the updated args
     args = hunyuan_video_sampler.args
 
+    # warmup
+    outputs = hunyuan_video_sampler.predict(
+        prompt=args.prompt,
+        height=args.video_size[0],
+        width=args.video_size[1],
+        video_length=args.video_length,
+        seed=args.seed,
+        negative_prompt=args.neg_prompt,
+        infer_steps=2,
+        guidance_scale=args.cfg_scale,
+        num_videos_per_prompt=args.num_videos,
+        flow_shift=args.flow_shift,
+        batch_size=args.batch_size,
+        embedded_guidance_scale=args.embedded_cfg_scale,
+        i2v_mode=args.i2v_mode,
+        i2v_resolution=args.i2v_resolution,
+        i2v_image_path=args.i2v_image_path,
+        i2v_condition_type=args.i2v_condition_type,
+        i2v_stability=args.i2v_stability,
+        ulysses_degree=args.ulysses_degree,
+        ring_degree=args.ring_degree,
+        ref_images=[(os.path.join(args.input_path, "ref_image.png"),
+                     os.path.join(args.input_path, "ref_depth.exr"))],
+        partial_cond=[(os.path.join(args.input_path, "video_input", f"render_{j:04d}.png"), os.path.join(
+            args.input_path, "video_input", f"depth_{j:04d}.exr")) for j in range(49)],
+        partial_mask=[(os.path.join(args.input_path, "video_input", f"mask_{j:04d}.png"), os.path.join(
+            args.input_path, "video_input", f"mask_{j:04d}.png")) for j in range(49)]
+    )
+
     # Start sampling
     # TODO: batch inference check
     torch.npu.synchronize()
