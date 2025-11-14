@@ -534,7 +534,7 @@ class Inference(object):
         self.parallel_args = parallel_args
 
     @classmethod
-    def initialize_usp(args):
+    def initialize_usp(cls, args):
         from voyager.utils.distributed.parallel_mgr import init_parallel_env, ParallelConfig
         dist.init_process_group(backend="hccl", init_method="env://")
         parallel_config = ParallelConfig(
@@ -574,7 +574,7 @@ class Inference(object):
             device = torch.device(f"cuda:{local_rank}")
             # 20250316 pftq: Set CUDA device explicitly
             torch.cuda.set_device(local_rank)
-            initialize_usp()
+            cls.initialize_usp(args)
             rank = dist.get_rank()
             world_size = dist.get_world_size()
         else:

@@ -1163,8 +1163,8 @@ Please use VaeImageProcessor.postprocess(...) instead"
                         step_idx = i // getattr(self.scheduler, "order", 1)
                         callback(step_idx, t, latents)
         torch.npu.synchronize()
-        end = time.time()
-        print(f"-DIT time: {end - start} seconds")
+        end_time = time.time()
+        print(f"-DIT time: {end_time - start_time} seconds")
         torch.npu.empty_cache()
 
         start_time = time.time()
@@ -1212,8 +1212,8 @@ Please use VaeImageProcessor.postprocess(...) instead"
         else:
             image = latents
         torch.npu.synchronize()
-        end = time.time()
-        print(f"-VAE dec time: {end - start} seconds")
+        end_time = time.time()
+        print(f"-VAE dec time: {end_time - start_time} seconds")
 
         image = (image / 2 + 0.5).clamp(0, 1)
         # we always cast to float32 as this does not cause significant overhead and is compatible with bfloa16

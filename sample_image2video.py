@@ -9,6 +9,7 @@ from voyager.config import parse_args
 from voyager.inference import HunyuanVideoSampler
 
 import time
+import torch
 import torch_npu
 from torch_npu.contrib import transfer_to_npu
 from mindiesd import CacheConfig, CacheAgent
@@ -101,7 +102,7 @@ def main():
     # Start sampling
     # TODO: batch inference check
     torch.npu.synchronize()
-    start_time = time.time
+    start_time = time.time()
     outputs = hunyuan_video_sampler.predict(
         prompt=args.prompt,
         height=args.video_size[0],
