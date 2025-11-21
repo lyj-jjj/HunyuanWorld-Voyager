@@ -734,6 +734,12 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
             **factory_kwargs,
         )
 
+        # DIT cache
+        self.use_cache = args.use_cache
+        self.use_cache_double = args.use_cache_double
+        self.cache_single = None
+        self.cache_dual = None
+
         # context block
         self.use_context_block = args.use_context_block
         if self.use_context_block:
@@ -928,12 +934,26 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
                 # print(f'gradient checkpointing...')
                 img, txt = torch.utils.checkpoint.checkpoint(
                     ckpt_wrapper(block), *double_block_args, use_reentrant=False)
-                if self.use_context_block:
-                    img += condition1
             else:
-                img, txt = block(*double_block_args)
-                if self.use_context_block:
-                    img += condition1
+                if not self.use_cache_double:
+                    img, txt = block(*double_block_args)
+                else:
+                    img, txt = self.cache_dual.apply(block,
+                                                     hidden_states=img,
+                                                     encoder_hidden_states=txt,
+                                                     vec=vec,
+                                                     cu_seqlens_q=cu_seqlens_q,
+                                                     cu_seqlens_kv=cu_seqlens_kv,
+                                                     max_seqlen_q=max_seqlen_q,
+                                                     max_seqlen_kv=max_seqlen_kv,
+                                                     freqs_cis=freqs_cis,
+                                                     condition_type=self.i2v_condition_type,
+                                                     token_replace_vec=token_replace_vec,
+                                                     frist_frame_token_num=frist_frame_token_num,
+                                                     )
+
+            if self.use_context_block:
+                img += condition1
 
         # Merge txt and img to pass through single stream blocks.
         x = torch.cat((img, txt), 1)
@@ -959,12 +979,25 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
                         layer_num + len(self.double_blocks) < self.gradient_checkpoint_layers):
                     x = torch.utils.checkpoint.checkpoint(ckpt_wrapper(
                         block), *single_block_args, use_reentrant=False)
-                    if self.use_context_block:
-                        x += condition2
                 else:
-                    x = block(*single_block_args)
-                    if self.use_context_block:
-                        x += condition2
+                    if not self.use_cache:
+                        x = block(*single_block_args)
+                    else:
+                        x = self.cache_single.apply(block,
+                                                    hidden_states=x,
+                                                    vec=vec,
+                                                    txt_len=txt_seq_len,
+                                                    cu_seqlens_q=cu_seqlens_q,
+                                                    cu_seqlens_kv=cu_seqlens_kv,
+                                                    max_seqlen_q=max_seqlen_q,
+                                                    max_seqlen_kv=max_seqlen_kv,
+                                                    freqs_cis=(freqs_cos, freqs_sin),
+                                                    condition_type=self.i2v_condition_type,
+                                                    token_replace_vec=token_replace_vec,
+                                                    frist_frame_token_num=frist_frame_token_num,
+                                                    )
+                if self.use_context_block:
+                    x += condition2
 
         img = x[:, :img_seq_len, ...]
 

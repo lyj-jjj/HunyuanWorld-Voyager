@@ -35,6 +35,36 @@ def main():
 
     # add attention cache
     transformer = hunyuan_video_sampler.pipeline.transformer
+
+    if args.use_cache:
+        # single
+        config_single = CacheConfig(
+            method="dit_block_cache",
+            blocks_count=len(transformer.single_blocks),
+            steps_count=args.infer_steps,
+            step_start=args.cache_start_steps,
+            step_interval=args.cache_interval,
+            step_end=args.infer_steps-1,
+            block_start=args.single_block_start,
+            block_end=args.single_block_end
+        )
+        cache_single = CacheAgent(config_single)
+        transformer.cache_single = cache_single
+    if args.use_cache_double:
+        # double
+        config_double = CacheConfig(
+            method="dit_block_cache",
+            blocks_count=len(transformer.double_blocks),
+            steps_count=args.infer_steps,
+            step_start=args.cache_start_steps,
+            step_interval=args.cache_interval,
+            step_end=args.infer_steps-1,
+            block_start=args.double_block_start,
+            block_end=args.double_block_end
+        )
+        cache_dual = CacheAgent(config_double)
+        transformer.cache_dual = cache_dual
+
     if args.use_attentioncache:
         config_double = CacheConfig(
             method="attention_cache",

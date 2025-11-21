@@ -28,6 +28,7 @@ def parse_args(mode="eval", namespace=None):
     parser = add_lora_args(parser)
     parser = add_inference_args(parser)
     parser = add_parallel_args(parser)
+    parser = add_ditcache_args(parser)
     parser = add_attentioncache_args(parser)
     
     # Add training-specific arguments if in training mode
@@ -42,6 +43,29 @@ def parse_args(mode="eval", namespace=None):
     args = sanity_check_args(args)
 
     return args
+
+def add_ditcache_args(parser: argparse.ArgumentParser):
+    group = parser.add_argument_group(title="Dit Cache args")
+
+    # single cache related config
+    group.add_argument("--use_cache", action='store_true')
+    group.add_argument("--cache_interval", type=int, default=3)
+    group.add_argument("--cache_start_steps", type=int, default=10)
+
+    group.add_argument("--single_block_start", type=int, default=5)
+    group.add_argument("--single_block_end", type=int, default=35)
+
+    ## double stream cache related config
+    group.add_argument("--use_cache_double", action='store_true')
+    group.add_argument("--double_block_start", type=int, default=3)
+    group.add_argument("--double_block_end", type=int, default=18)
+
+    # cache searcher config
+    group.add_argument("--search_single_cache", action='store_true')
+    group.add_argument("--search_double_cache", action='store_true')
+    group.add_argument("--cache_ratio", type=float, default=1.2)
+
+    return parser
 
 def add_attentioncache_args(parser: argparse.ArgumentParser):
     group = parser.add_argument_group(title="Attention Cache args")
