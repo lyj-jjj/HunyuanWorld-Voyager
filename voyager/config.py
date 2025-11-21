@@ -523,6 +523,12 @@ def add_inference_args(parser: argparse.ArgumentParser):
         help="Use CPU offload for the model load.",
     )
 
+    group.add_argument(
+        "--use-encoder-load-cpu",
+        action="store_true",
+        help="Use encoder to load cpu to save memorys.",
+    )
+
     # ======================== General inference settings ========================
     group.add_argument(
         "--batch-size",
